@@ -9,13 +9,16 @@ public class Main {
 
         if (args.length == 0) {
             System.out.println("Usage:");
-            System.out.println("  server <port>");
+            System.out.println("  server <port> <replicaId>");
             System.out.println("  client");
             return;
         }
 
         if (args[0].equalsIgnoreCase("server")) {
-            WalletServer.start(Integer.parseInt(args[1]));
+            int port = Integer.parseInt(args[1]);
+            String replicaId = args[2];
+            WalletServer.start(port, replicaId);
+
         } else if (args[0].equalsIgnoreCase("client")) {
             WalletClient client = new WalletClient();
             client.demoCalls();

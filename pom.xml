@@ -67,6 +67,13 @@
             <version>20210307</version>
         </dependency>
 
+        <dependency>
+            <groupId>org.apache.zookeeper</groupId>
+            <artifactId>zookeeper</artifactId>
+            <version>3.9.2</version>
+        </dependency>
+
+
     </dependencies>
 
     <build>

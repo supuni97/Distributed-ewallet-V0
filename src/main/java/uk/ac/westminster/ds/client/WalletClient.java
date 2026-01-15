@@ -52,18 +52,31 @@ public class WalletClient {
     public void demoCalls() throws IOException, InterruptedException {
         ensureReady();
 
-        System.out.println(stub.createAccount(
-                CreateAccountRequest.newBuilder().setAccountId("alice").build()
-        ).getMessage());
+        try {
+            System.out.println(stub.createAccount(
+                    CreateAccountRequest.newBuilder().setAccountId("alice").build()
+            ).getMessage());
 
-        System.out.println(stub.deposit(
-                AmountRequest.newBuilder().setAccountId("alice").setAmount(100).build()
-        ).getMessage());
+            System.out.println(stub.deposit(
+                    AmountRequest.newBuilder().setAccountId("alice").setAmount(100).build()
+            ).getMessage());
 
-        System.out.println("Balance = " + stub.getBalance(
-                BalanceRequest.newBuilder().setAccountId("alice").build()
-        ).getBalance());
+            System.out.println("Balance = " + stub.getBalance(
+                    BalanceRequest.newBuilder().setAccountId("alice").build()
+            ).getBalance());
+
+        } catch (io.grpc.StatusRuntimeException e) {
+            if (e.getStatus().getDescription() != null && e.getStatus().getDescription().contains("NOT_LEADER")) {
+                System.out.println("Hit follower. Rediscovering leader via etcd...");
+                fetchServerDetails();
+                initializeConnection();
+                demoCalls(); // retry once
+                return;
+            }
+            throw e;
+        }
     }
+
 
     public void close() {
         if (channel != null) channel.shutdown();
