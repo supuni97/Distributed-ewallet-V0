@@ -10,14 +10,16 @@ public class Main {
         if (args.length == 0) {
             System.out.println("Usage:");
             System.out.println("  server <port>");
-            System.out.println("  client <host> <port>");
+            System.out.println("  client");
             return;
         }
 
         if (args[0].equalsIgnoreCase("server")) {
             WalletServer.start(Integer.parseInt(args[1]));
         } else if (args[0].equalsIgnoreCase("client")) {
-            WalletClient.run(args[1], Integer.parseInt(args[2]));
+            WalletClient client = new WalletClient();
+            client.demoCalls();
+            client.close();
         }
     }
 }
