@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "uk.ac.westminster.ds.ewallet.grpc";
+option java_outer_classname = "EWalletProto";
+
+package ewallet;
+
+// Requests / responses
+message CreateAccountRequest { string accountId = 1; }
+message CreateAccountResponse { bool created = 1; string message = 2; }
+
+message BalanceRequest { string accountId = 1; }
+message BalanceResponse { bool found = 1; double balance = 2; string message = 3; }
+
+message AmountRequest { string accountId = 1; double amount = 2; }
+message AmountResponse { bool ok = 1; double balance = 2; string message = 3; }
+
+// gRPC Service
+service WalletService {
+  rpc CreateAccount(CreateAccountRequest) returns (CreateAccountResponse);
+  rpc GetBalance(BalanceRequest) returns (BalanceResponse);
+  rpc Deposit(AmountRequest) returns (AmountResponse);
+  rpc Withdraw(AmountRequest) returns (AmountResponse);
+}
