@@ -36,4 +36,19 @@ public class ReplicationServiceImpl extends ReplicationServiceGrpc.ReplicationSe
         responseObserver.onNext(Ack.newBuilder().setOk(true).build());
         responseObserver.onCompleted();
     }
+
+    @Override
+    public void replicateTransfer(TransferRequest request,
+                                  StreamObserver<Ack> responseObserver) {
+
+        store.transfer(
+                request.getFromAccount().trim(),
+                request.getToAccount().trim(),
+                request.getAmount()
+        );
+
+        responseObserver.onNext(Ack.newBuilder().setOk(true).build());
+        responseObserver.onCompleted();
+    }
+
 }

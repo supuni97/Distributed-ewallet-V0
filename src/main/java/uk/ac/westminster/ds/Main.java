@@ -8,15 +8,13 @@ public class Main {
     public static void main(String[] args) throws Exception {
 
         if (args.length == 0) {
-            System.out.println("Usage:");
-            System.out.println("  server <port> <replicaId> <partitionId>");
-            System.out.println("  client [accountId]");
+            printUsage();
             return;
         }
 
         if (args[0].equalsIgnoreCase("server")) {
             if (args.length != 4) {
-                System.out.println("Usage: server <port> <replicaId> <partitionId>");
+                printUsage();
                 return;
             }
 
@@ -25,16 +23,51 @@ public class Main {
             int partitionId = Integer.parseInt(args[3]);
 
             WalletServer.start(port, replicaId, partitionId);
+            return;
+        }
 
-        } else if (args[0].equalsIgnoreCase("client")) {
-            String accountId = (args.length >= 2) ? args[1].trim() : "alice";
-
+        if (args[0].equalsIgnoreCase("client")) {
             WalletClient client = new WalletClient();
+
+            // Default: demo on alice
+            if (args.length == 1) {
+                client.demoCalls("alice");
+                client.close();
+                return;
+            }
+
+            // Transfer mode: client transfer <from> <to> <amount>
+            if (args.length >= 2 && args[1].equalsIgnoreCase("transfer")) {
+                if (args.length != 5) {
+                    System.out.println("Usage: client transfer <fromAccount> <toAccount> <amount>");
+                    client.close();
+                    return;
+                }
+
+                String from = args[2].trim();
+                String to = args[3].trim();
+                double amount = Double.parseDouble(args[4]);
+
+                client.transfer(from, to, amount);
+                client.close();
+                return;
+            }
+
+            // Otherwise: client <accountId>  (demo calls for that account)
+            String accountId = args[1].trim();
             client.demoCalls(accountId);
             client.close();
-
-        } else {
-            System.out.println("Unknown mode: " + args[0]);
+            return;
         }
+
+        System.out.println("Unknown mode: " + args[0]);
+        printUsage();
+    }
+
+    private static void printUsage() {
+        System.out.println("Usage:");
+        System.out.println("  server <port> <replicaId> <partitionId>");
+        System.out.println("  client [accountId]");
+        System.out.println("  client transfer <fromAccount> <toAccount> <amount>");
     }
 }

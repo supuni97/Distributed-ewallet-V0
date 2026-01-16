@@ -178,4 +178,47 @@ public class WalletServiceImpl extends WalletServiceGrpc.WalletServiceImplBase {
         responseObserver.onNext(response);
         responseObserver.onCompleted();
     }
+
+    private void replicateTransfer(String from, String to, double amount) {
+        for (int port : replicaPorts) {
+            if (port == myPort) continue;
+
+            callFollower(port, stub -> stub.replicateTransfer(
+                    TransferRequest.newBuilder()
+                            .setFromAccount(from)
+                            .setToAccount(to)
+                            .setAmount(amount)
+                            .build()
+            ));
+        }
+
+    }
+
+    @Override
+    public void transfer(TransferRequest request,
+                         StreamObserver<TransferResponse> responseObserver) {
+
+        if (!ensureLeader(responseObserver)) return;
+
+        String from = request.getFromAccount().trim();
+        String to = request.getToAccount().trim();
+        double amount = request.getAmount();
+
+        boolean ok = store.transfer(from, to, amount);
+
+        if (ok) {
+            replicateTransfer(from, to, amount);
+        }
+
+        TransferResponse response = TransferResponse.newBuilder()
+                .setOk(ok)
+                .setMessage(ok ? "Transfer successful"
+                        : "Transfer failed (invalid account or insufficient funds)")
+                .build();
+
+        responseObserver.onNext(response);
+        responseObserver.onCompleted();
+    }
+
+
 }

@@ -12,8 +12,6 @@ public class WalletClient {
 
     public static final String NAME_SERVICE_ADDRESS = "http://localhost:2379";
     public static final String SERVICE_NAME = "WalletService";
-
-    // Milestone 4: two partitions
     public static final int NUM_PARTITIONS = 2;
 
     private ManagedChannel channel;
@@ -24,15 +22,17 @@ public class WalletClient {
 
     public WalletClient() {}
 
-    // Deterministic partition function (same input -> same shard)
+    // Deterministic partition mapping
     private int partitionFor(String accountId) {
         return Math.abs(accountId.hashCode()) % NUM_PARTITIONS;
     }
 
-    // etcd key for that partition leader
+    private String serviceKeyForPartition(int partitionId) {
+        return SERVICE_NAME + "/p" + partitionId;
+    }
+
     private String serviceKeyForAccount(String accountId) {
-        int p = partitionFor(accountId);
-        return SERVICE_NAME + "/p" + p;
+        return serviceKeyForPartition(partitionFor(accountId));
     }
 
     private void fetchServerDetails(String serviceKey) throws IOException, InterruptedException {
@@ -59,7 +59,7 @@ public class WalletClient {
         ConnectivityState state = channel.getState(true);
         while (state != ConnectivityState.READY) {
             System.out.println("Service unavailable, looking for a service provider.");
-            close(); // close old channel before reconnect
+            close();
             fetchServerDetails(serviceKey);
             initializeConnection();
             Thread.sleep(2000);
@@ -67,6 +67,19 @@ public class WalletClient {
         }
     }
 
+    private boolean isNotLeader(io.grpc.StatusRuntimeException e) {
+        return e.getStatus().getDescription() != null
+                && e.getStatus().getDescription().contains("NOT_LEADER");
+    }
+
+    private void rediscoverLeader(String serviceKey) throws IOException, InterruptedException {
+        System.out.println("Hit follower. Rediscovering leader via etcd...");
+        close();
+        fetchServerDetails(serviceKey);
+        initializeConnection();
+    }
+
+    // -------- Milestone 4 demo calls (create + deposit + balance) --------
     public void demoCalls(String accountId) throws IOException, InterruptedException {
         String serviceKey = serviceKeyForAccount(accountId);
         System.out.println("Using partition key: " + serviceKey);
@@ -87,30 +100,65 @@ public class WalletClient {
             ).getBalance());
 
         } catch (io.grpc.StatusRuntimeException e) {
-            // If we hit a follower, rediscover leader for that partition
-            if (e.getStatus().getDescription() != null &&
-                    e.getStatus().getDescription().contains("NOT_LEADER")) {
-
-                System.out.println("Hit follower. Rediscovering leader via etcd...");
-                close();
-                fetchServerDetails(serviceKey);
-                initializeConnection();
-
+            if (isNotLeader(e)) {
+                rediscoverLeader(serviceKey);
                 // retry once
-                System.out.println(stub.getBalance(
-                        BalanceRequest.newBuilder().setAccountId(accountId).build()
-                ).getBalance());
+                demoCalls(accountId);
                 return;
             }
+            throw e;
+        }
+    }
 
+    // -------- Milestone 5: within-partition transfer --------
+    public void transfer(String from, String to, double amount) throws IOException, InterruptedException {
+
+        int pFrom = partitionFor(from);
+        int pTo = partitionFor(to);
+
+        // Milestone 5 is WITHIN partition only.
+        if (pFrom != pTo) {
+            System.out.println("CROSS_PARTITION_TRANSFER_NOT_SUPPORTED_IN_MILESTONE_5");
+            System.out.println("from partition = p" + pFrom + ", to partition = p" + pTo);
+            return;
+        }
+
+        String serviceKey = serviceKeyForPartition(pFrom);
+        System.out.println("Using partition key: " + serviceKey);
+
+        ensureReady(serviceKey);
+
+        try {
+            TransferResponse resp = stub.transfer(
+                    TransferRequest.newBuilder()
+                            .setFromAccount(from)
+                            .setToAccount(to)
+                            .setAmount(amount)
+                            .build()
+            );
+
+            System.out.println(resp.getMessage());
+
+            // show balances after transfer (useful for evidence)
+            double fromBal = stub.getBalance(BalanceRequest.newBuilder().setAccountId(from).build()).getBalance();
+            double toBal = stub.getBalance(BalanceRequest.newBuilder().setAccountId(to).build()).getBalance();
+            System.out.println("After transfer:");
+            System.out.println("  " + from + " = " + fromBal);
+            System.out.println("  " + to + " = " + toBal);
+
+        } catch (io.grpc.StatusRuntimeException e) {
+            if (isNotLeader(e)) {
+                rediscoverLeader(serviceKey);
+                // retry once
+                transfer(from, to, amount);
+                return;
+            }
             throw e;
         }
     }
 
     public void close() {
-        if (channel != null) {
-            channel.shutdownNow();
-        }
+        if (channel != null) channel.shutdownNow();
         channel = null;
         stub = null;
     }
