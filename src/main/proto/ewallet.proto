@@ -23,3 +23,13 @@ service WalletService {
   rpc Deposit(AmountRequest) returns (AmountResponse);
   rpc Withdraw(AmountRequest) returns (AmountResponse);
 }
+
+service ReplicationService {
+  rpc replicateCreateAccount (CreateAccountRequest) returns (Ack);
+  rpc replicateDeposit (AmountRequest) returns (Ack);
+  rpc replicateWithdraw (AmountRequest) returns (Ack);
+}
+
+message Ack {
+  bool ok = 1;
+}

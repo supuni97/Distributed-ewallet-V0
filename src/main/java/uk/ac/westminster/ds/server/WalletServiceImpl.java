@@ -1,10 +1,14 @@
 package uk.ac.westminster.ds.server;
 
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import uk.ac.westminster.ds.ewallet.grpc.*;
 import uk.ac.westminster.ds.store.AccountStore;
 
+import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class WalletServiceImpl extends WalletServiceGrpc.WalletServiceImplBase {
@@ -12,9 +16,15 @@ public class WalletServiceImpl extends WalletServiceGrpc.WalletServiceImplBase {
     private final AccountStore store;
     private final AtomicBoolean isLeader;
 
-    public WalletServiceImpl(AccountStore store, AtomicBoolean isLeader) {
+    // Milestone 3
+    private final int myPort;
+    private final List<Integer> replicaPorts;
+
+    public WalletServiceImpl(AccountStore store, AtomicBoolean isLeader, int myPort, List<Integer> replicaPorts) {
         this.store = store;
         this.isLeader = isLeader;
+        this.myPort = myPort;
+        this.replicaPorts = replicaPorts;
     }
 
     private boolean ensureLeader(StreamObserver<?> responseObserver) {
@@ -29,12 +39,74 @@ public class WalletServiceImpl extends WalletServiceGrpc.WalletServiceImplBase {
         return true;
     }
 
+    // ===== Milestone 3: replication helpers =====
+
+    @FunctionalInterface
+    private interface ReplicationCall {
+        void run(ReplicationServiceGrpc.ReplicationServiceBlockingStub stub);
+    }
+
+    private void callFollower(int port, ReplicationCall call) {
+        ManagedChannel ch = null;
+        try {
+            ch = ManagedChannelBuilder.forAddress("localhost", port)
+                    .usePlaintext()
+                    .build();
+
+            ReplicationServiceGrpc.ReplicationServiceBlockingStub repl =
+                    ReplicationServiceGrpc.newBlockingStub(ch);
+
+            call.run(repl);
+
+        } catch (Exception e) {
+            // For Milestone 3: log and continue (best-effort replication)
+            System.err.println("Replication failed to follower localhost:" + port + " -> " + e.getMessage());
+        } finally {
+            if (ch != null) {
+                ch.shutdown();
+                try { ch.awaitTermination(1, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+            }
+        }
+    }
+
+    private void replicateCreate(String accountId) {
+        for (int port : replicaPorts) {
+            if (port == myPort) continue;
+            callFollower(port, stub -> stub.replicateCreateAccount(
+                    CreateAccountRequest.newBuilder().setAccountId(accountId).build()
+            ));
+        }
+    }
+
+    private void replicateDeposit(String accountId, double amount) {
+        for (int port : replicaPorts) {
+            if (port == myPort) continue;
+            callFollower(port, stub -> stub.replicateDeposit(
+                    AmountRequest.newBuilder().setAccountId(accountId).setAmount(amount).build()
+            ));
+        }
+    }
+
+    private void replicateWithdraw(String accountId, double amount) {
+        for (int port : replicaPorts) {
+            if (port == myPort) continue;
+            callFollower(port, stub -> stub.replicateWithdraw(
+                    AmountRequest.newBuilder().setAccountId(accountId).setAmount(amount).build()
+            ));
+        }
+    }
+
+    // ===== WalletService RPCs =====
+
     @Override
     public void createAccount(CreateAccountRequest request, StreamObserver<CreateAccountResponse> responseObserver) {
         if (!ensureLeader(responseObserver)) return;
 
         String id = request.getAccountId().trim();
         boolean created = store.createAccount(id);
+
+        // replicate (idempotent on followers)
+        replicateCreate(id);
 
         CreateAccountResponse response = CreateAccountResponse.newBuilder()
                 .setCreated(created)
@@ -47,8 +119,7 @@ public class WalletServiceImpl extends WalletServiceGrpc.WalletServiceImplBase {
 
     @Override
     public void getBalance(BalanceRequest request, StreamObserver<BalanceResponse> responseObserver) {
-        // Reads can be served by any replica OR leader-only.
-        // For now, keep it simple: allow reads on any replica.
+        // Keep reads allowed on any replica (same as your current code :contentReference[oaicite:4]{index=4})
         String id = request.getAccountId().trim();
         Double balance = store.getBalance(id);
 
@@ -64,8 +135,15 @@ public class WalletServiceImpl extends WalletServiceGrpc.WalletServiceImplBase {
     public void deposit(AmountRequest request, StreamObserver<AmountResponse> responseObserver) {
         if (!ensureLeader(responseObserver)) return;
 
-        boolean ok = store.deposit(request.getAccountId().trim(), request.getAmount());
-        Double bal = store.getBalance(request.getAccountId().trim());
+        String id = request.getAccountId().trim();
+        double amount = request.getAmount();
+
+        boolean ok = store.deposit(id, amount);
+        if (ok) {
+            replicateDeposit(id, amount);
+        }
+
+        Double bal = store.getBalance(id);
 
         AmountResponse response = AmountResponse.newBuilder()
                 .setOk(ok)
@@ -81,8 +159,15 @@ public class WalletServiceImpl extends WalletServiceGrpc.WalletServiceImplBase {
     public void withdraw(AmountRequest request, StreamObserver<AmountResponse> responseObserver) {
         if (!ensureLeader(responseObserver)) return;
 
-        boolean ok = store.withdraw(request.getAccountId().trim(), request.getAmount());
-        Double bal = store.getBalance(request.getAccountId().trim());
+        String id = request.getAccountId().trim();
+        double amount = request.getAmount();
+
+        boolean ok = store.withdraw(id, amount);
+        if (ok) {
+            replicateWithdraw(id, amount);
+        }
+
+        Double bal = store.getBalance(id);
 
         AmountResponse response = AmountResponse.newBuilder()
                 .setOk(ok)
