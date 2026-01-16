@@ -13,20 +13,32 @@ public class WalletClient {
     public static final String NAME_SERVICE_ADDRESS = "http://localhost:2379";
     public static final String SERVICE_NAME = "WalletService";
 
+    // Milestone 4: two partitions
+    public static final int NUM_PARTITIONS = 2;
+
     private ManagedChannel channel;
     private WalletServiceGrpc.WalletServiceBlockingStub stub;
 
     private String host;
     private int port;
 
-    public WalletClient() throws InterruptedException, IOException {
-        fetchServerDetails();
-        initializeConnection();
+    public WalletClient() {}
+
+    // Deterministic partition function (same input -> same shard)
+    private int partitionFor(String accountId) {
+        return Math.abs(accountId.hashCode()) % NUM_PARTITIONS;
     }
 
-    private void fetchServerDetails() throws IOException, InterruptedException {
+    // etcd key for that partition leader
+    private String serviceKeyForAccount(String accountId) {
+        int p = partitionFor(accountId);
+        return SERVICE_NAME + "/p" + p;
+    }
+
+    private void fetchServerDetails(String serviceKey) throws IOException, InterruptedException {
+        System.out.println("Searching for details of service: " + serviceKey);
         NameServiceClient ns = new NameServiceClient(NAME_SERVICE_ADDRESS);
-        NameServiceClient.ServiceDetails details = ns.findService(SERVICE_NAME);
+        NameServiceClient.ServiceDetails details = ns.findService(serviceKey);
         host = details.getIPAddress();
         port = details.getPort();
     }
@@ -38,47 +50,68 @@ public class WalletClient {
         channel.getState(true);
     }
 
-    private void ensureReady() throws IOException, InterruptedException {
+    private void ensureReady(String serviceKey) throws IOException, InterruptedException {
+        if (channel == null) {
+            fetchServerDetails(serviceKey);
+            initializeConnection();
+        }
+
         ConnectivityState state = channel.getState(true);
         while (state != ConnectivityState.READY) {
             System.out.println("Service unavailable, looking for a service provider.");
-            fetchServerDetails();
+            close(); // close old channel before reconnect
+            fetchServerDetails(serviceKey);
             initializeConnection();
-            Thread.sleep(5000);
+            Thread.sleep(2000);
             state = channel.getState(true);
         }
     }
 
-    public void demoCalls() throws IOException, InterruptedException {
-        ensureReady();
+    public void demoCalls(String accountId) throws IOException, InterruptedException {
+        String serviceKey = serviceKeyForAccount(accountId);
+        System.out.println("Using partition key: " + serviceKey);
+
+        ensureReady(serviceKey);
 
         try {
             System.out.println(stub.createAccount(
-                    CreateAccountRequest.newBuilder().setAccountId("alice").build()
+                    CreateAccountRequest.newBuilder().setAccountId(accountId).build()
             ).getMessage());
 
             System.out.println(stub.deposit(
-                    AmountRequest.newBuilder().setAccountId("alice").setAmount(100).build()
+                    AmountRequest.newBuilder().setAccountId(accountId).setAmount(100).build()
             ).getMessage());
 
             System.out.println("Balance = " + stub.getBalance(
-                    BalanceRequest.newBuilder().setAccountId("alice").build()
+                    BalanceRequest.newBuilder().setAccountId(accountId).build()
             ).getBalance());
 
         } catch (io.grpc.StatusRuntimeException e) {
-            if (e.getStatus().getDescription() != null && e.getStatus().getDescription().contains("NOT_LEADER")) {
+            // If we hit a follower, rediscover leader for that partition
+            if (e.getStatus().getDescription() != null &&
+                    e.getStatus().getDescription().contains("NOT_LEADER")) {
+
                 System.out.println("Hit follower. Rediscovering leader via etcd...");
-                fetchServerDetails();
+                close();
+                fetchServerDetails(serviceKey);
                 initializeConnection();
-                demoCalls(); // retry once
+
+                // retry once
+                System.out.println(stub.getBalance(
+                        BalanceRequest.newBuilder().setAccountId(accountId).build()
+                ).getBalance());
                 return;
             }
+
             throw e;
         }
     }
 
-
     public void close() {
-        if (channel != null) channel.shutdown();
+        if (channel != null) {
+            channel.shutdownNow();
+        }
+        channel = null;
+        stub = null;
     }
 }
