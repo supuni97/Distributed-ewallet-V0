@@ -10,16 +10,19 @@ service WalletService {
   rpc deposit (AmountRequest) returns (AmountResponse);
   rpc withdraw (AmountRequest) returns (AmountResponse);
 
-  // Milestone 5 (within-partition transfer)
+  // Milestone 5
   rpc transfer (TransferRequest) returns (TransferResponse);
+
+  // Milestone 6 (2PC)
+  rpc prepareTransfer (TransferRequest) returns (PrepareResponse);
+  rpc commitTransfer (TransferRequest) returns (Ack);
+  rpc abortTransfer (TransferRequest) returns (Ack);
 }
 
 service ReplicationService {
   rpc replicateCreateAccount (CreateAccountRequest) returns (Ack);
   rpc replicateDeposit (AmountRequest) returns (Ack);
   rpc replicateWithdraw (AmountRequest) returns (Ack);
-
-  // Milestone 5 (leader -> followers)
   rpc replicateTransfer (TransferRequest) returns (Ack);
 }
 
@@ -60,6 +63,11 @@ message TransferRequest {
 }
 
 message TransferResponse {
+  bool ok = 1;
+  string message = 2;
+}
+
+message PrepareResponse {
   bool ok = 1;
   string message = 2;
 }

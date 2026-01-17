@@ -15,12 +15,13 @@ public class WalletServiceImpl extends WalletServiceGrpc.WalletServiceImplBase {
 
     private final AccountStore store;
     private final AtomicBoolean isLeader;
-
-    // Milestone 3
     private final int myPort;
     private final List<Integer> replicaPorts;
 
-    public WalletServiceImpl(AccountStore store, AtomicBoolean isLeader, int myPort, List<Integer> replicaPorts) {
+    public WalletServiceImpl(AccountStore store,
+                             AtomicBoolean isLeader,
+                             int myPort,
+                             List<Integer> replicaPorts) {
         this.store = store;
         this.isLeader = isLeader;
         this.myPort = myPort;
@@ -29,17 +30,14 @@ public class WalletServiceImpl extends WalletServiceGrpc.WalletServiceImplBase {
 
     private boolean ensureLeader(StreamObserver<?> responseObserver) {
         if (!isLeader.get()) {
-            ((StreamObserver<Object>) responseObserver).onError(
+            responseObserver.onError(
                     Status.FAILED_PRECONDITION
                             .withDescription("NOT_LEADER")
-                            .asRuntimeException()
-            );
+                            .asRuntimeException());
             return false;
         }
         return true;
     }
-
-    // ===== Milestone 3: replication helpers =====
 
     @FunctionalInterface
     private interface ReplicationCall {
@@ -49,149 +47,171 @@ public class WalletServiceImpl extends WalletServiceGrpc.WalletServiceImplBase {
     private void callFollower(int port, ReplicationCall call) {
         ManagedChannel ch = null;
         try {
-            ch = ManagedChannelBuilder.forAddress("localhost", port)
+            ch = ManagedChannelBuilder
+                    .forAddress("localhost", port)
                     .usePlaintext()
                     .build();
 
-            ReplicationServiceGrpc.ReplicationServiceBlockingStub repl =
+            ReplicationServiceGrpc.ReplicationServiceBlockingStub stub =
                     ReplicationServiceGrpc.newBlockingStub(ch);
 
-            call.run(repl);
+            call.run(stub);
 
         } catch (Exception e) {
-            // For Milestone 3: log and continue (best-effort replication)
-            System.err.println("Replication failed to follower localhost:" + port + " -> " + e.getMessage());
+            System.err.println("Replication failed to port " + port + ": " + e.getMessage());
         } finally {
             if (ch != null) {
                 ch.shutdown();
-                try { ch.awaitTermination(1, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+                try {
+                    ch.awaitTermination(1, TimeUnit.SECONDS);
+                } catch (InterruptedException ignored) {
+                }
             }
         }
     }
 
-    private void replicateCreate(String accountId) {
+    private void replicateCreateAccount(String accountId) {
         for (int port : replicaPorts) {
             if (port == myPort) continue;
-            callFollower(port, stub -> stub.replicateCreateAccount(
-                    CreateAccountRequest.newBuilder().setAccountId(accountId).build()
-            ));
+            callFollower(port, stub ->
+                    stub.replicateCreateAccount(
+                            CreateAccountRequest.newBuilder()
+                                    .setAccountId(accountId)
+                                    .build()));
         }
     }
 
     private void replicateDeposit(String accountId, double amount) {
         for (int port : replicaPorts) {
             if (port == myPort) continue;
-            callFollower(port, stub -> stub.replicateDeposit(
-                    AmountRequest.newBuilder().setAccountId(accountId).setAmount(amount).build()
-            ));
+            callFollower(port, stub ->
+                    stub.replicateDeposit(
+                            AmountRequest.newBuilder()
+                                    .setAccountId(accountId)
+                                    .setAmount(amount)
+                                    .build()));
         }
     }
 
     private void replicateWithdraw(String accountId, double amount) {
         for (int port : replicaPorts) {
             if (port == myPort) continue;
-            callFollower(port, stub -> stub.replicateWithdraw(
-                    AmountRequest.newBuilder().setAccountId(accountId).setAmount(amount).build()
-            ));
+            callFollower(port, stub ->
+                    stub.replicateWithdraw(
+                            AmountRequest.newBuilder()
+                                    .setAccountId(accountId)
+                                    .setAmount(amount)
+                                    .build()));
         }
-    }
-
-    // ===== WalletService RPCs =====
-
-    @Override
-    public void createAccount(CreateAccountRequest request, StreamObserver<CreateAccountResponse> responseObserver) {
-        if (!ensureLeader(responseObserver)) return;
-
-        String id = request.getAccountId().trim();
-        boolean created = store.createAccount(id);
-
-        // replicate (idempotent on followers)
-        replicateCreate(id);
-
-        CreateAccountResponse response = CreateAccountResponse.newBuilder()
-                .setCreated(created)
-                .setMessage(created ? "Account created" : "Account already exists")
-                .build();
-
-        responseObserver.onNext(response);
-        responseObserver.onCompleted();
-    }
-
-    @Override
-    public void getBalance(BalanceRequest request, StreamObserver<BalanceResponse> responseObserver) {
-        // Keep reads allowed on any replica (same as your current code :contentReference[oaicite:4]{index=4})
-        String id = request.getAccountId().trim();
-        Double balance = store.getBalance(id);
-
-        BalanceResponse response = (balance == null)
-                ? BalanceResponse.newBuilder().setFound(false).setBalance(0).setMessage("Account not found").build()
-                : BalanceResponse.newBuilder().setFound(true).setBalance(balance).setMessage("OK").build();
-
-        responseObserver.onNext(response);
-        responseObserver.onCompleted();
-    }
-
-    @Override
-    public void deposit(AmountRequest request, StreamObserver<AmountResponse> responseObserver) {
-        if (!ensureLeader(responseObserver)) return;
-
-        String id = request.getAccountId().trim();
-        double amount = request.getAmount();
-
-        boolean ok = store.deposit(id, amount);
-        if (ok) {
-            replicateDeposit(id, amount);
-        }
-
-        Double bal = store.getBalance(id);
-
-        AmountResponse response = AmountResponse.newBuilder()
-                .setOk(ok)
-                .setBalance(bal == null ? 0 : bal)
-                .setMessage(ok ? "Deposit successful" : "Deposit failed")
-                .build();
-
-        responseObserver.onNext(response);
-        responseObserver.onCompleted();
-    }
-
-    @Override
-    public void withdraw(AmountRequest request, StreamObserver<AmountResponse> responseObserver) {
-        if (!ensureLeader(responseObserver)) return;
-
-        String id = request.getAccountId().trim();
-        double amount = request.getAmount();
-
-        boolean ok = store.withdraw(id, amount);
-        if (ok) {
-            replicateWithdraw(id, amount);
-        }
-
-        Double bal = store.getBalance(id);
-
-        AmountResponse response = AmountResponse.newBuilder()
-                .setOk(ok)
-                .setBalance(bal == null ? 0 : bal)
-                .setMessage(ok ? "Withdraw successful" : "Withdraw failed (insufficient funds or account missing)")
-                .build();
-
-        responseObserver.onNext(response);
-        responseObserver.onCompleted();
     }
 
     private void replicateTransfer(String from, String to, double amount) {
         for (int port : replicaPorts) {
             if (port == myPort) continue;
+            callFollower(port, stub ->
+                    stub.replicateTransfer(
+                            TransferRequest.newBuilder()
+                                    .setFromAccount(from)
+                                    .setToAccount(to)
+                                    .setAmount(amount)
+                                    .build()));
+        }
+    }
 
-            callFollower(port, stub -> stub.replicateTransfer(
-                    TransferRequest.newBuilder()
-                            .setFromAccount(from)
-                            .setToAccount(to)
-                            .setAmount(amount)
-                            .build()
-            ));
+    @Override
+    public void createAccount(CreateAccountRequest request,
+                              StreamObserver<CreateAccountResponse> responseObserver) {
+
+        if (!ensureLeader(responseObserver)) return;
+
+        boolean created = store.createAccount(request.getAccountId());
+
+        if (created) {
+            replicateCreateAccount(request.getAccountId());
         }
 
+        responseObserver.onNext(
+                CreateAccountResponse.newBuilder()
+                        .setCreated(created)
+                        .setMessage(created ? "Account created" : "Account already exists")
+                        .build());
+        responseObserver.onCompleted();
+    }
+
+    @Override
+    public void getBalance(BalanceRequest request,
+                           StreamObserver<BalanceResponse> responseObserver) {
+
+        Double bal = store.getBalance(request.getAccountId());
+
+        if (bal == null) {
+            responseObserver.onNext(
+                    BalanceResponse.newBuilder()
+                            .setFound(false)
+                            .setBalance(0)
+                            .setMessage("Account not found")
+                            .build());
+        } else {
+            responseObserver.onNext(
+                    BalanceResponse.newBuilder()
+                            .setFound(true)
+                            .setBalance(bal)
+                            .setMessage("OK")
+                            .build());
+        }
+        responseObserver.onCompleted();
+    }
+
+    @Override
+    public void deposit(AmountRequest request,
+                        StreamObserver<AmountResponse> responseObserver) {
+
+        if (!ensureLeader(responseObserver)) return;
+
+        boolean ok = store.deposit(
+                request.getAccountId(),
+                request.getAmount());
+
+        if (ok) {
+            replicateDeposit(request.getAccountId(), request.getAmount());
+        }
+
+        responseObserver.onNext(
+                AmountResponse.newBuilder()
+                        .setOk(ok)
+                        .setBalance(
+                                store.getBalance(request.getAccountId()) == null
+                                        ? 0
+                                        : store.getBalance(request.getAccountId()))
+                        .setMessage(ok ? "Deposit successful" : "Account not found")
+                        .build());
+        responseObserver.onCompleted();
+    }
+
+    @Override
+    public void withdraw(AmountRequest request,
+                         StreamObserver<AmountResponse> responseObserver) {
+
+        if (!ensureLeader(responseObserver)) return;
+
+        boolean ok = store.withdraw(
+                request.getAccountId(),
+                request.getAmount());
+
+        if (ok) {
+            replicateWithdraw(request.getAccountId(), request.getAmount());
+        }
+
+        responseObserver.onNext(
+                AmountResponse.newBuilder()
+                        .setOk(ok)
+                        .setBalance(
+                                store.getBalance(request.getAccountId()) == null
+                                        ? 0
+                                        : store.getBalance(request.getAccountId()))
+                        .setMessage(ok ? "Withdraw successful" : "Insufficient funds or account not found")
+                        .build());
+        responseObserver.onCompleted();
     }
 
     @Override
@@ -200,25 +220,62 @@ public class WalletServiceImpl extends WalletServiceGrpc.WalletServiceImplBase {
 
         if (!ensureLeader(responseObserver)) return;
 
-        String from = request.getFromAccount().trim();
-        String to = request.getToAccount().trim();
-        double amount = request.getAmount();
-
-        boolean ok = store.transfer(from, to, amount);
+        boolean ok = store.transfer(
+                request.getFromAccount(),
+                request.getToAccount(),
+                request.getAmount());
 
         if (ok) {
-            replicateTransfer(from, to, amount);
+            replicateTransfer(
+                    request.getFromAccount(),
+                    request.getToAccount(),
+                    request.getAmount());
         }
 
-        TransferResponse response = TransferResponse.newBuilder()
-                .setOk(ok)
-                .setMessage(ok ? "Transfer successful"
-                        : "Transfer failed (invalid account or insufficient funds)")
-                .build();
-
-        responseObserver.onNext(response);
+        responseObserver.onNext(
+                TransferResponse.newBuilder()
+                        .setOk(ok)
+                        .setMessage(ok
+                                ? "Transfer successful"
+                                : "Transfer failed (invalid account or insufficient funds)")
+                        .build());
         responseObserver.onCompleted();
     }
 
+    @Override
+    public void prepareTransfer(TransferRequest request,
+                                StreamObserver<PrepareResponse> responseObserver) {
 
+        boolean ok = store.prepareDebit(
+                request.getFromAccount(),
+                request.getAmount());
+
+        responseObserver.onNext(
+                PrepareResponse.newBuilder()
+                        .setOk(ok)
+                        .setMessage(ok ? "READY" : "INSUFFICIENT_FUNDS")
+                        .build());
+        responseObserver.onCompleted();
+    }
+
+    @Override
+    public void commitTransfer(TransferRequest request,
+                               StreamObserver<Ack> responseObserver) {
+
+        store.commitDebit(request.getFromAccount());
+        store.deposit(request.getToAccount(), request.getAmount());
+
+        responseObserver.onNext(Ack.newBuilder().setOk(true).build());
+        responseObserver.onCompleted();
+    }
+
+    @Override
+    public void abortTransfer(TransferRequest request,
+                              StreamObserver<Ack> responseObserver) {
+
+        store.abortDebit(request.getFromAccount());
+
+        responseObserver.onNext(Ack.newBuilder().setOk(true).build());
+        responseObserver.onCompleted();
+    }
 }

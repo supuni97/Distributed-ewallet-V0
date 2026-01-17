@@ -1,165 +1,104 @@
 package uk.ac.westminster.ds.client;
 
-import io.grpc.ConnectivityState;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import uk.ac.westminster.ds.ewallet.grpc.*;
 import uk.ac.westminster.ds.nameservice.NameServiceClient;
 
-import java.io.IOException;
-
 public class WalletClient {
 
-    public static final String NAME_SERVICE_ADDRESS = "http://localhost:2379";
-    public static final String SERVICE_NAME = "WalletService";
-    public static final int NUM_PARTITIONS = 2;
+    private static final int PARTITIONS = 2;
+    private static final String SERVICE = "WalletService";
 
     private ManagedChannel channel;
-    private WalletServiceGrpc.WalletServiceBlockingStub stub;
 
-    private String host;
-    private int port;
+    /* ---------------- Partition logic ---------------- */
 
-    public WalletClient() {}
-
-    // Deterministic partition mapping
-    private int partitionFor(String accountId) {
-        return Math.abs(accountId.hashCode()) % NUM_PARTITIONS;
+    private int partitionFor(String id) {
+        return Math.abs(id.hashCode()) % PARTITIONS;
     }
 
-    private String serviceKeyForPartition(int partitionId) {
-        return SERVICE_NAME + "/p" + partitionId;
+    private WalletServiceGrpc.WalletServiceBlockingStub stubFor(int partition)
+            throws Exception {
+
+        NameServiceClient ns = new NameServiceClient("http://localhost:2379");
+        NameServiceClient.ServiceDetails sd =
+                ns.findService(SERVICE + "/p" + partition);
+
+        channel = ManagedChannelBuilder
+                .forAddress(sd.getIPAddress(), sd.getPort())
+                .usePlaintext()
+                .build();
+
+        return WalletServiceGrpc.newBlockingStub(channel);
     }
 
-    private String serviceKeyForAccount(String accountId) {
-        return serviceKeyForPartition(partitionFor(accountId));
+    /* ---------------- Milestone 4 demo ---------------- */
+
+    public void demoCalls(String accountId) throws Exception {
+
+        int p = partitionFor(accountId);
+        WalletServiceGrpc.WalletServiceBlockingStub stub = stubFor(p);
+
+        System.out.println(stub.createAccount(
+                CreateAccountRequest.newBuilder()
+                        .setAccountId(accountId)
+                        .build()).getMessage());
+
+        System.out.println(stub.deposit(
+                AmountRequest.newBuilder()
+                        .setAccountId(accountId)
+                        .setAmount(100)
+                        .build()).getMessage());
+
+        System.out.println("Balance = " +
+                stub.getBalance(
+                        BalanceRequest.newBuilder()
+                                .setAccountId(accountId)
+                                .build()).getBalance());
     }
 
-    private void fetchServerDetails(String serviceKey) throws IOException, InterruptedException {
-        System.out.println("Searching for details of service: " + serviceKey);
-        NameServiceClient ns = new NameServiceClient(NAME_SERVICE_ADDRESS);
-        NameServiceClient.ServiceDetails details = ns.findService(serviceKey);
-        host = details.getIPAddress();
-        port = details.getPort();
-    }
+    /* ---------------- Milestone 6 transfer ---------------- */
 
-    private void initializeConnection() {
-        System.out.println("Connecting to server at " + host + ":" + port);
-        channel = ManagedChannelBuilder.forAddress(host, port).usePlaintext().build();
-        stub = WalletServiceGrpc.newBlockingStub(channel);
-        channel.getState(true);
-    }
-
-    private void ensureReady(String serviceKey) throws IOException, InterruptedException {
-        if (channel == null) {
-            fetchServerDetails(serviceKey);
-            initializeConnection();
-        }
-
-        ConnectivityState state = channel.getState(true);
-        while (state != ConnectivityState.READY) {
-            System.out.println("Service unavailable, looking for a service provider.");
-            close();
-            fetchServerDetails(serviceKey);
-            initializeConnection();
-            Thread.sleep(2000);
-            state = channel.getState(true);
-        }
-    }
-
-    private boolean isNotLeader(io.grpc.StatusRuntimeException e) {
-        return e.getStatus().getDescription() != null
-                && e.getStatus().getDescription().contains("NOT_LEADER");
-    }
-
-    private void rediscoverLeader(String serviceKey) throws IOException, InterruptedException {
-        System.out.println("Hit follower. Rediscovering leader via etcd...");
-        close();
-        fetchServerDetails(serviceKey);
-        initializeConnection();
-    }
-
-    // -------- Milestone 4 demo calls (create + deposit + balance) --------
-    public void demoCalls(String accountId) throws IOException, InterruptedException {
-        String serviceKey = serviceKeyForAccount(accountId);
-        System.out.println("Using partition key: " + serviceKey);
-
-        ensureReady(serviceKey);
-
-        try {
-            System.out.println(stub.createAccount(
-                    CreateAccountRequest.newBuilder().setAccountId(accountId).build()
-            ).getMessage());
-
-            System.out.println(stub.deposit(
-                    AmountRequest.newBuilder().setAccountId(accountId).setAmount(100).build()
-            ).getMessage());
-
-            System.out.println("Balance = " + stub.getBalance(
-                    BalanceRequest.newBuilder().setAccountId(accountId).build()
-            ).getBalance());
-
-        } catch (io.grpc.StatusRuntimeException e) {
-            if (isNotLeader(e)) {
-                rediscoverLeader(serviceKey);
-                // retry once
-                demoCalls(accountId);
-                return;
-            }
-            throw e;
-        }
-    }
-
-    // -------- Milestone 5: within-partition transfer --------
-    public void transfer(String from, String to, double amount) throws IOException, InterruptedException {
+    public void transfer(String from, String to, double amount) throws Exception {
 
         int pFrom = partitionFor(from);
         int pTo = partitionFor(to);
 
-        // Milestone 5 is WITHIN partition only.
-        if (pFrom != pTo) {
-            System.out.println("CROSS_PARTITION_TRANSFER_NOT_SUPPORTED_IN_MILESTONE_5");
-            System.out.println("from partition = p" + pFrom + ", to partition = p" + pTo);
+        WalletServiceGrpc.WalletServiceBlockingStub fromStub = stubFor(pFrom);
+        WalletServiceGrpc.WalletServiceBlockingStub toStub = stubFor(pTo);
+
+        TransferRequest req =
+                TransferRequest.newBuilder()
+                        .setFromAccount(from)
+                        .setToAccount(to)
+                        .setAmount(amount)
+                        .build();
+
+        // Same partition → normal transfer
+        if (pFrom == pTo) {
+            System.out.println(fromStub.transfer(req).getMessage());
             return;
         }
 
-        String serviceKey = serviceKeyForPartition(pFrom);
-        System.out.println("Using partition key: " + serviceKey);
+        PrepareResponse r1 = fromStub.prepareTransfer(req);
 
-        ensureReady(serviceKey);
-
-        try {
-            TransferResponse resp = stub.transfer(
-                    TransferRequest.newBuilder()
-                            .setFromAccount(from)
-                            .setToAccount(to)
-                            .setAmount(amount)
-                            .build()
-            );
-
-            System.out.println(resp.getMessage());
-
-            // show balances after transfer (useful for evidence)
-            double fromBal = stub.getBalance(BalanceRequest.newBuilder().setAccountId(from).build()).getBalance();
-            double toBal = stub.getBalance(BalanceRequest.newBuilder().setAccountId(to).build()).getBalance();
-            System.out.println("After transfer:");
-            System.out.println("  " + from + " = " + fromBal);
-            System.out.println("  " + to + " = " + toBal);
-
-        } catch (io.grpc.StatusRuntimeException e) {
-            if (isNotLeader(e)) {
-                rediscoverLeader(serviceKey);
-                // retry once
-                transfer(from, to, amount);
-                return;
-            }
-            throw e;
+        if (r1.getOk()) {
+            fromStub.commitTransfer(req);
+            toStub.commitTransfer(req);
+            System.out.println("2PC transfer committed");
+        } else {
+            fromStub.abortTransfer(req);
+            System.out.println("2PC transfer aborted");
         }
+
     }
 
+    /* ---------------- Cleanup ---------------- */
+
     public void close() {
-        if (channel != null) channel.shutdownNow();
-        channel = null;
-        stub = null;
+        if (channel != null) {
+            channel.shutdownNow();
+        }
     }
 }
